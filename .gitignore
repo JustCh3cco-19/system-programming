@@ -50,3 +50,7 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+.vscode
+
+server
+test_decrypt_blocks
