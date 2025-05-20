@@ -1,23 +1,13 @@
-#ifndef CLIENT_H
-#define CLIENT_H
+#pragma once
 
+#include "utils.h"
 #include <stdint.h>
+#include <stddef.h>
 
-// Tipo per i valori a 64 bit
-typedef unsigned long long u64;
-
-// Struttura per passare gli argomenti ai thread
-typedef struct {
-    u64 *blocks;        // Array di blocchi da elaborare
-    u64 key;            // Chiave di cifratura
-    int start_idx;      // Indice iniziale nel blocco
-    int end_idx;        // Indice finale (esclusivo)
-} ThreadArgs;
-
-// Funzione eseguita dai thread per cifrare i blocchi
-void* encrypt_blocks(void* arg);
-
-// Funzione per gestire la conversione in network byte order (64-bit)
-u64 htonll(u64 val);
-
-#endif // CLIENT_H
+// Funzioni client
+int read_file(const char *filename, uint8_t **buffer, size_t *len);
+int encrypt_file_blocks(const uint8_t *input, size_t len, uint64_t key, uint8_t **output, size_t *outlen, int n_threads);
+int connect_to_server(const char *ip, int port);
+int send_encrypted_message(int sockfd, const uint8_t *ciphertext, size_t cipher_len, uint64_t orig_len, uint64_t key);
+int wait_ack(int sockfd);
+void ignore_signals();
