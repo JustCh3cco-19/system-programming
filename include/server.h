@@ -1,14 +1,22 @@
-#pragma once
+#ifndef SERVER_H
+#define SERVER_H
 
-#include "utils.h"
-#include <stdint.h>
-#include <stddef.h>
-#include <pthread.h>
+#include "common.h"
+#include <semaphore.h>
+#include <netinet/in.h>
 
-// Funzioni server
-int start_server_socket(int port, int max_conn);
-int accept_client(int listenfd);
-int receive_encrypted_message(int clientfd, uint8_t **cipher, size_t *cipher_len, uint64_t *orig_len, uint64_t *key);
-int send_ack(int clientfd);
-int write_file_with_prefix(const char *prefix, const uint8_t *data, size_t len);
-void ignore_signals();
+// Nodo per buffer a lista concatenata
+struct node {
+    uint64_t     data;
+    struct node *next;
+};
+
+struct decrypt_data {
+    struct node *start_node;
+    size_t       count;
+    key_t        key;
+};
+
+int server_run(int p, const char *prefix, int backlog, uint16_t port);
+
+#endif // SERVER_H

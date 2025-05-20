@@ -1,167 +1,171 @@
+#include "server.h"
+#include "utils.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h> // Per sockaddr_in, INADDR_ANY, htons, accept, htobe64, be64toh
 #include <pthread.h>
+#include <time.h>
 #include <signal.h>
-#include <errno.h>    // Per perror
-#include "server.h"   // Contiene le dichiarazioni delle funzioni del server e utils.h
-#include "server_utils.h" // Contiene decrypt_blocks e la sua struct
 
-// Definizione del mutex (già presente nel tuo file originale)
-pthread_mutex_t file_counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int server_p;
+static const char *file_prefix;
+static sem_t conn_sem;
 
-void ignore_signals() {
-    signal(SIGINT, SIG_IGN);
-    signal(SIGALRM, SIG_IGN);
-    signal(SIGUSR1, SIG_IGN);
-    signal(SIGUSR2, SIG_IGN);
-    signal(SIGTERM, SIG_IGN);
+// Blocca i segnali specificati in tutti i thread
+static void block_signals(void) {
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGALRM);
+    sigaddset(&mask, SIGUSR1);
+    sigaddset(&mask, SIGUSR2);
+    sigaddset(&mask, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &mask, NULL);
 }
 
-int start_server_socket(int port, int max_conn) {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        perror("socket creation failed");
-        return -1;
+void *decrypt_thread(void *arg) {
+    struct decrypt_data *dd = arg;
+    block_signals();
+    struct node *curr = dd->start_node;
+    for (size_t i = 0; i < dd->count && curr; ++i) {
+        curr->data ^= dd->key;
+        curr = curr->next;
+    }
+    return NULL;
+}
+
+void *handle_client(void *arg) {
+    int client_fd = *(int*)arg;
+    free(arg);
+    sem_wait(&conn_sem);
+
+    // 1) Ricevi lunghezza e chiave
+    uint64_t net_L, net_key;
+    if (read_n(client_fd, &net_L,   sizeof net_L) <= 0) goto cleanup;
+    if (read_n(client_fd, &net_key, sizeof net_key) <= 0) goto cleanup;
+    size_t L   = ntohll(net_L);
+    key_t  key = ntohll(net_key);
+
+    // 2) Costruisci la linked-list dei blocchi ricevuti
+    size_t n = (L + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    struct node *head = NULL, *tail = NULL;
+    for (size_t i = 0; i < n; ++i) {
+        struct node *nd = malloc(sizeof *nd);
+        nd->next = NULL;
+        uint64_t block;
+        read_n(client_fd, &block, sizeof block);
+        nd->data = block;
+        if (!head) head = nd; else tail->next = nd;
+        tail = nd;
     }
 
-    int opt = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("setsockopt SO_REUSEADDR failed");
-        close(sockfd);
-        return -1;
+    // 3) Blocca segnali e decifra in parallelo
+    block_signals();
+    pthread_t *threads = malloc(server_p * sizeof(pthread_t));
+    struct decrypt_data *dd = malloc(server_p * sizeof *dd);
+    size_t chunk = n / server_p;
+    struct node *curr = head;
+    for (int i = 0; i < server_p; ++i) {
+        dd[i].start_node = curr;
+        dd[i].count      = (i == server_p-1) ? (n - i*chunk) : chunk;
+        dd[i].key        = key;
+        for (size_t j = 0; j < dd[i].count; ++j) curr = curr->next;
+        pthread_create(&threads[i], NULL, decrypt_thread, &dd[i]);
     }
+    for (int i = 0; i < server_p; ++i) pthread_join(threads[i], NULL);
+
+    // 4) Invia ACK
+    signal(SIGPIPE, SIG_IGN);
+    write_n(client_fd, "ACK", 3);
+
+    // 5) Scrivi su file, troncando l’ultimo blocco a L byte esatti
+    time_t now = time(NULL);
+    struct tm tm = *localtime(&now);
+    char filename[256];
+    snprintf(filename, sizeof filename,
+             "%s_%04d%02d%02d%02d%02d%02d_%d.bin",
+             file_prefix,
+             tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec,
+             getpid());
+    FILE *fp = fopen(filename, "wb");
+    if (fp) {
+        struct node *it = head;
+        size_t written = 0;
+        while (it && written < L) {
+            size_t to_write = (L - written) < BLOCK_SIZE
+                                ? (L - written)
+                                : BLOCK_SIZE;
+            fwrite(&it->data, 1, to_write, fp);
+            written += to_write;
+            it = it->next;
+        }
+        fclose(fp);
+    }
+
+cleanup:
+    close(client_fd);
+    // libero la linked-list
+    struct node *it = head;
+    while (it) {
+        struct node *nx = it->next;
+        free(it);
+        it = nx;
+    }
+    free(threads);
+    free(dd);
+    sem_post(&conn_sem);
+    return NULL;
+}
+
+int server_run(int p, const char *prefix, int backlog, uint16_t port) {
+    server_p    = p;
+    file_prefix = prefix;
+    sem_init(&conn_sem, 0, backlog);
+
+    signal(SIGPIPE, SIG_IGN);
+    block_signals();
+
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int on = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+    if (listen_fd < 0) { perror("socket"); return 1; }
 
     struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY; // Accetta connessioni su qualsiasi interfaccia
-    addr.sin_port = htons(port);
-
-    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("bind failed");
-        close(sockfd);
-        return -1;
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons(port);
+    if (bind(listen_fd, (struct sockaddr*)&addr, sizeof addr) < 0) {
+        perror("bind"); return 1;
     }
+    listen(listen_fd, backlog);
 
-    if (listen(sockfd, max_conn) < 0) {
-        perror("listen failed");
-        close(sockfd);
-        return -1;
+    while (1) {
+        int *fdp = malloc(sizeof *fdp);
+        *fdp = accept(listen_fd, NULL, NULL);
+        if (*fdp < 0) { perror("accept"); free(fdp); continue; }
+        pthread_t tid;
+        pthread_create(&tid, NULL, handle_client, fdp);
+        pthread_detach(tid);
     }
-    printf("Server in ascolto sulla porta %d...\n", port);
-    return sockfd;
-}
-
-int accept_client(int listenfd) {
-    struct sockaddr_in cli_addr;
-    socklen_t len = sizeof(cli_addr);
-    int clientfd = accept(listenfd, (struct sockaddr*)&cli_addr, &len);
-    if (clientfd < 0) {
-        perror("accept client failed");
-        return -1;
-    }
-    // Stampa l'IP del client connesso (opzionale)
-    char client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &cli_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-    printf("Client connesso: %s\n", client_ip);
-    return clientfd;
-}
-
-int receive_encrypted_message(int clientfd, uint8_t **cipher, size_t *cipher_len, uint64_t *orig_len, uint64_t *key) {
-    uint64_t L_net, K_net;
-    ssize_t n_read;
-
-    n_read = read(clientfd, &L_net, sizeof(L_net));
-    if (n_read != sizeof(L_net)) {
-        if (n_read < 0) perror("read L_net failed"); else fprintf(stderr, "read L_net: short read\n");
-        return -1;
-    }
-    n_read = read(clientfd, &K_net, sizeof(K_net));
-    if (n_read != sizeof(K_net)) {
-         if (n_read < 0) perror("read K_net failed"); else fprintf(stderr, "read K_net: short read\n");
-        return -1;
-    }
-
-    *orig_len = be64toh(L_net);
-    *key = be64toh(K_net); // Il server riceve la chiave, assicurati sia il comportamento desiderato
-
-    if (*orig_len == 0 && BLOCK_SIZE > 0) { // Se il file originale è vuoto, la lunghezza paddata è BLOCK_SIZE
-         *cipher_len = BLOCK_SIZE; // Anche un file vuoto viene "paddato" a BLOCK_SIZE per la crittografia/decrittografia
-    } else {
-        *cipher_len = ((*orig_len + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
-    }
-    
-    if (*cipher_len == 0 && *orig_len > 0) { // caso anomalo se blocksize è 0 o orig_len molto grande
-        fprintf(stderr, "Cipher length calcolata a 0 per orig_len > 0. Controllare BLOCK_SIZE.\n");
-        return -1;
-    }
-    if (*cipher_len == 0 && *orig_len == 0) { // Se il file è vuoto e blocksize è 0 o non definito
-         // Potrebbe essere valido se si vuole inviare 0 bytes per un file vuoto e non fare padding.
-         // Ma la logica di padding attuale implica che cipher_len sia almeno BLOCK_SIZE se orig_len > 0 (o anche =0)
-         // Se si permette orig_len = 0 e cipher_len = 0, allocare 0 bytes con calloc è ok ma read leggerà 0.
-         // Per coerenza con encrypt, se orig_len=0, cipher_len dovrebbe essere BLOCK_SIZE (o 0 se non si fa padding di file vuoti)
-         // Attualmente, se orig_len=0, cipher_len = BLOCK_SIZE.
-    }
-
-
-    *cipher = calloc(1, *cipher_len); // calloc è sicuro per cipher_len = 0 (restituisce NULL o un puntatore valido deallocabile)
-    if (!*cipher && *cipher_len > 0) { // Controlla solo se cipher_len > 0, perché calloc(1,0) può restituire NULL
-        perror("calloc for cipher failed");
-        return -1;
-    }
-
-    if (*cipher_len > 0) { // Leggi solo se c'è qualcosa da leggere
-        n_read = read(clientfd, *cipher, *cipher_len);
-        if (n_read != (ssize_t)*cipher_len) {
-            if (n_read < 0) perror("read ciphertext failed"); else fprintf(stderr, "read ciphertext: short read (expected %zu, got %zd)\n", *cipher_len, n_read);
-            free(*cipher);
-            *cipher = NULL;
-            return -1;
-        }
-    }
-    printf("Messaggio crittografato ricevuto (%zu bytes, lunghezza originale %lu, chiave %lx)\n", *cipher_len, *orig_len, *key);
     return 0;
 }
 
-int send_ack(int clientfd) {
-    char ack = 'A'; // ACK standard
-    if (write(clientfd, &ack, 1) != 1) {
-        perror("send ack failed");
-        return -1;
-    }
-    printf("ACK inviato al client.\n");
-    return 0;
-}
-
-int write_file_with_prefix(const char *prefix, const uint8_t *data, size_t len) {
-    // La gestione del contatore statico con mutex è già nel tuo codice originale ed è corretta
-    // per accessi multithread a questa funzione (se il server gestisce più client concorrentemente).
-    static int counter = 0;
-    char filename[256]; // Assicurati che sia sufficientemente grande
-
-    pthread_mutex_lock(&file_counter_mutex);
-    snprintf(filename, sizeof(filename), "%s_%03d.out", prefix, counter++);
-    pthread_mutex_unlock(&file_counter_mutex);
-
-    FILE *f = fopen(filename, "wb");
-    if (!f) {
-        perror("fopen for output file failed");
-        return -1;
-    }
-
-    if (len > 0) { // Scrivi solo se ci sono dati da scrivere
-        if (fwrite(data, 1, len, f) != len) {
-            perror("fwrite to output file failed");
-            fclose(f);
-            // Potresti voler rimuovere il file parzialmente scritto qui
-            // remove(filename);
-            return -1;
-        }
-    }
-
-    fclose(f);
-    printf("Dati salvati in: %s (%zu bytes)\n", filename, len);
-    return 0;
+int main(int argc, char *argv[]) {
+    signal(SIGPIPE, SIG_IGN);
+    int p; const char *prefix; int backlog; uint16_t port;
+    if (getenv("SRV_P"))       p       = atoi(getenv("SRV_P"));
+    else if (argc > 1)         p       = atoi(argv[1]);
+    else { fprintf(stderr,"Usage: server <p> <prefix> <backlog> <port>\n"); return 1; }
+    if (getenv("SRV_PREFIX"))  prefix  = getenv("SRV_PREFIX");
+    else if (argc > 2)         prefix  = argv[2];
+    else { fprintf(stderr,"Usage: server <p> <prefix> <backlog> <port>\n"); return 1; }
+    if (getenv("SRV_BACKLOG")) backlog = atoi(getenv("SRV_BACKLOG"));
+    else if (argc > 3)         backlog = atoi(argv[3]);
+    else { fprintf(stderr,"Usage: server <p> <prefix> <backlog> <port>\n"); return 1; }
+    if (getenv("SRV_PORT"))    port    = atoi(getenv("SRV_PORT"));
+    else if (argc > 4)         port    = atoi(argv[4]);
+    else { fprintf(stderr,"Usage: server <p> <prefix> <backlog> <port>\n"); return 1; }
+    return server_run(p, prefix, backlog, port);
 }

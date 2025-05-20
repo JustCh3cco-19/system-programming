@@ -1,13 +1,16 @@
-#pragma once
+#ifndef CLIENT_H
+#define CLIENT_H
 
-#include "utils.h"
-#include <stdint.h>
-#include <stddef.h>
+#include "common.h"
+#include <netinet/in.h>
 
-// Funzioni client
-int read_file(const char *filename, uint8_t **buffer, size_t *len);
-int encrypt_file_blocks(const uint8_t *input, size_t len, uint64_t key, uint8_t **output, size_t *outlen, int n_threads);
-int connect_to_server(const char *ip, int port);
-int send_encrypted_message(int sockfd, const uint8_t *ciphertext, size_t cipher_len, uint64_t orig_len, uint64_t key);
-int wait_ack(int sockfd);
-void ignore_signals();
+struct thread_data {
+    uint64_t *blocks;
+    size_t    start;
+    size_t    end;
+    key_t     key;
+};
+
+int client_run(const char *filename, key_t key, int p, const char *server_ip, uint16_t port);
+
+#endif // CLIENT_H
