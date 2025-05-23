@@ -55,4 +55,3 @@ dkms.conf
 
 server
 test_decrypt_blocks
-*.bin
