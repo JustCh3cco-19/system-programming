@@ -1,5 +1,3 @@
-#include "server.h"
-#include "utils.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -7,12 +5,19 @@
 #include <pthread.h>
 #include <time.h>
 #include <signal.h>
+#include "server.h"
+#include "utils.h"
 
+// Numero di thread di decrittazione e prefisso per i file di output
 static int server_p;
 static const char *file_prefix;
+// Semaforo per limitare il numero di connessioni concorrenti
 static sem_t conn_sem;
 
-// Blocca i segnali specificati in tutti i thread
+/**
+ * @brief Blocca i segnali specificati nel thread corrente.
+ *        Utile per evitare che i thread di lavoro vengano interrotti da segnali.
+ */
 static void block_signals(void) {
     sigset_t mask;
     sigemptyset(&mask);
@@ -24,6 +29,10 @@ static void block_signals(void) {
     pthread_sigmask(SIG_BLOCK, &mask, NULL);
 }
 
+/**
+ * @brief Thread worker per la decrittazione di una porzione della lista.
+ * @param arg Puntatore a una struttura decrypt_data contenente i dati necessari.
+ */
 void *decrypt_thread(void *arg) {
     struct decrypt_data *dd = arg;
     block_signals();
@@ -35,19 +44,27 @@ void *decrypt_thread(void *arg) {
     return NULL;
 }
 
+/**
+ * @brief Gestisce una singola connessione client.
+ *        Riceve i dati, li decritta in parallelo, invia ACK e salva su file.
+ * @param arg Puntatore al file descriptor del client.
+ */
 void *handle_client(void *arg) {
     int client_fd = *(int*)arg;
     free(arg);
     sem_wait(&conn_sem);
 
-    // 1) Ricevi lunghezza e chiave
+    // Messaggio di ricezione file
+    printf("Ricevuto un nuovo file da decriptare, inizio elaborazione...\n");
+
+    // 1) Ricezione della lunghezza del messaggio e della chiave di decrittazione
     uint64_t net_L, net_key;
     if (read_n(client_fd, &net_L,   sizeof net_L) <= 0) goto cleanup;
     if (read_n(client_fd, &net_key, sizeof net_key) <= 0) goto cleanup;
     size_t L   = ntohll(net_L);
-    key_t  key = ntohll(net_key);
+    uint64_t  key = ntohll(net_key);
 
-    // 2) Costruisci la linked-list dei blocchi ricevuti
+    // 2) Costruzione della lista collegata dei blocchi ricevuti
     size_t n = (L + BLOCK_SIZE - 1) / BLOCK_SIZE;
     struct node *head = NULL, *tail = NULL;
     for (size_t i = 0; i < n; ++i) {
@@ -60,7 +77,7 @@ void *handle_client(void *arg) {
         tail = nd;
     }
 
-    // 3) Blocca segnali e decifra in parallelo
+    // 3) Decriptazione parallela tramite thread
     block_signals();
     pthread_t *threads = malloc(server_p * sizeof(pthread_t));
     struct decrypt_data *dd = malloc(server_p * sizeof *dd);
@@ -75,11 +92,14 @@ void *handle_client(void *arg) {
     }
     for (int i = 0; i < server_p; ++i) pthread_join(threads[i], NULL);
 
-    // 4) Invia ACK
+    // Messaggio di fine decriptazione
+    printf("Decriptazione completata! File salvato con successo.\n");
+
+    // 4) Invio ACK al client per confermare la ricezione e la decrittazione
     signal(SIGPIPE, SIG_IGN);
     write_n(client_fd, "ACK", 3);
 
-    // 5) Scrivi su file, troncando l’ultimo blocco a L byte esatti
+    // 5) Scrittura dei dati decriptati su file, troncando l’ultimo blocco se necessario
     time_t now = time(NULL);
     struct tm tm = *localtime(&now);
     char filename[256];
@@ -106,7 +126,7 @@ void *handle_client(void *arg) {
 
 cleanup:
     close(client_fd);
-    // libero la linked-list
+    // Libera la memoria della linked list
     struct node *it = head;
     while (it) {
         struct node *nx = it->next;
@@ -119,6 +139,14 @@ cleanup:
     return NULL;
 }
 
+/**
+ * @brief Avvia il server TCP multithread.
+ * @param p Numero di thread di decrittazione per ogni client.
+ * @param prefix Prefisso per i file di output.
+ * @param backlog Numero massimo di connessioni concorrenti.
+ * @param port Porta TCP su cui ascoltare.
+ * @return 0 in caso di successo, 1 in caso di errore.
+ */
 int server_run(int p, const char *prefix, int backlog, uint16_t port) {
     server_p    = p;
     file_prefix = prefix;
@@ -141,6 +169,10 @@ int server_run(int p, const char *prefix, int backlog, uint16_t port) {
     }
     listen(listen_fd, backlog);
 
+    // Messaggio di avvio server
+    printf("Server avviato con successo e in ascolto...\n");
+
+    // Ciclo principale: accetta nuove connessioni e crea un thread per ciascun client
     while (1) {
         int *fdp = malloc(sizeof *fdp);
         *fdp = accept(listen_fd, NULL, NULL);
@@ -152,6 +184,10 @@ int server_run(int p, const char *prefix, int backlog, uint16_t port) {
     return 0;
 }
 
+/**
+ * @brief Entry point del programma server.
+ *        Legge i parametri da variabili d'ambiente o da linea di comando.
+ */
 int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
     int p; const char *prefix; int backlog; uint16_t port;

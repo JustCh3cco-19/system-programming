@@ -1,7 +1,9 @@
 # system-programming
 
 ## Compilare
-make
+client: gcc -Wall -Wextra -Iinclude -pthread src/client.c src/utils.c -o client.out
+server: gcc -Wall -Wextra -Iinclude -pthread src/server.c src/utils.c -o server.out
+
 
 ### Testing
 Spostarsi nella cartella test
@@ -57,4 +59,4 @@ client: ../client.out ok.txt 0x1FFFFFFFFFFFFFFFF 2 127.0.0.1 12345
 ## Per killare il server 
 ps aux | grep server.out
 
-kill -9 <id_pid>
+kill -9 <server_id_pid>
