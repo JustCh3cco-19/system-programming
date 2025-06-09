@@ -1,12 +1,12 @@
 # system-programming
 
 ## Compilare
-client: gcc -Wall -Wextra -Iinclude -pthread src/client.c src/utils.c -o client.out
-server: gcc -Wall -Wextra -Iinclude -pthread src/server.c src/utils.c -o server.out
+client: gcc -Iinclude -pthread src/client.c src/utils.c -o client.out
+server: gcc -Iinclude -pthread src/server.c src/utils.c -o server.out
 
 
 ### Testing
-Spostarsi nella cartella test
+cd test
 
 Da terminale avviare i seguenti comandi
 Test1:
