@@ -65,15 +65,18 @@ where `P_i` is the i-th plaintext block and `K` is the 64-bit key.
 To compile all modules (client, server, and utilities):
 
 # Compile separately:
+```sh
 gcc src/client.c src/utils.c -Iinclude -lpthread -o client.out
 gcc src/server.c src/utils.c -Iinclude -lpthread -o server.out
-
+```
 ---
 
 ## Usage
 
 ### Server
+```sh
 ./server.out <max_threads> <output_prefix> <max_connections> <port>
+```
 
 **Parameters:**
 - `max_threads`: Maximum number of threads for parallel decryption
@@ -82,7 +85,9 @@ gcc src/server.c src/utils.c -Iinclude -lpthread -o server.out
 - `port`: TCP port to listen on
 
 ### Client
+```sh
 ./client.out <input_file> <encryption_key> <threads> <server_ip> <server_port>
+```
 
 **Parameters:**
 - `input_file`: Path to file to encrypt and send
@@ -114,43 +119,57 @@ Server: ./server.out 4 s 2 12345
 Client: ../client.out random_1k.bin 0xCAFEBABEDEADBEEF 4 127.0.0.1 12345
 
 ### Test 5: Zero key test
-Server: ./server.out 2 s 2 12345  
-Client: ../client.out sample4.txt 0x0000000000000000 2 127.0.0.1 12345
+Server: ```sh ./server.out 2 s 2 12345 ```
+  
+Client: ```sh ../client.out sample4.txt 0x0000000000000000 2 127.0.0.1 12345 ```
 
 ### Test 6: Multiple concurrent connections
-Server: ./server.out 4 s 5 12345  
+Server: ```sh ./server.out 4 s 5 12345 ```  
 Client (run in different terminals):
+```sh
 ../client.out C1_1.bin 0x1111111111111111 4 127.0.0.1 12345 &
 ../client.out C1_2.bin 0x1111111111111112 4 127.0.0.1 12345 &
 ../client.out C1_3.bin 0x1111111111111113 4 127.0.0.1 12345 &
 ../client.out C1_4.bin 0x1111111111111114 4 127.0.0.1 12345 &
 ../client.out C1_5.bin 0x1111111111111115 4 127.0.0.1 12345 &
+```
 
 ### Test 7: Different output prefix
-Server: ./server.out 4 out 2 12345  
+Server: ```sh ./server.out 4 out 2 12345 ```  
 Client:
+```sh
 ../client.out C2_1.bin 0x2222222222222221 4 127.0.0.1 12345 &
 ../client.out C2_2.bin 0x2222222222222222 4 127.0.0.1 12345 &
 ../client.out C2_3.bin 0x2222222222222223 4 127.0.0.1 12345 &
+```
 
 ### Test 8: Large file with high parallelism
-Server: ./server.out 8 out 2 12345  
-Client: ../client.out big.bin 0xDEADBEEFCAFEBABE 8 127.0.0.1 12345 &  
+Server: 
+```sh
+./server.out 8 out 2 12345  
+```
+Client: 
+```sh
+../client.out big.bin 0xDEADBEEFCAFEBABE 8 127.0.0.1 12345 &  
 CLIENT_PID=$!
+```
 
 ### Test 9: Background server process
-Server: ./server.out 4 s 2 12345 &  
+Server: ```sh ./server.out 4 s 2 12345 & ```
+  
 SERVER_PID=$!  
-Client: ../client.out mid.bin 0xFEEDFACECAFEBABE 4 127.0.0.1 12345
+Client: ```sh ../client.out mid.bin 0xFEEDFACECAFEBABE 4 127.0.0.1 12345 ```
 
 ### Test 10: Edge case with large key
-Server: ./server.out 4 s 2 12345  
-Client: ../client.out ok.txt 0x1FFFFFFFFFFFFFFFF 2 127.0.0.1 12345
+Server: ```sh ./server.out 4 s 2 12345 ```  
+Client: ```sh ../client.out ok.txt 0x1FFFFFFFFFFFFFFFF 2 127.0.0.1 12345 ```
 
 ### Server Management
 To stop the server:
+```sh
 ps aux | grep server.out
 kill -9 <pid>
+```
 
 ---
 
